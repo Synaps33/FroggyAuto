@@ -11,14 +11,25 @@
 
 TARGET_NAME := re3
 RE3_PORT    ?= /home/Sajnaps/re3-sf2000
+
+ifneq ($(filter GB300%,$(FROGGY_TYPE)),)
+  override platform := gb300
+else
+  platform ?= sf2000
+endif
+
 TARGET      := $(TARGET_NAME)_libretro_$(platform).a
 ARCHIVE     := $(RE3_PORT)/build/$(platform)/libretro_re3.a
 
 ifeq ($(platform), sf2000)
 	STATIC_LINKING = 1
 endif
+ifeq ($(platform), gb300)
+	STATIC_LINKING = 1
+endif
 
 all:
+	rm -f ./*.a
 	$(MAKE) -C "$(RE3_PORT)" $(platform)
 	cp -f "$(ARCHIVE)" ./$(TARGET)
 

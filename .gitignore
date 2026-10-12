@@ -1,2 +1,11 @@
 build/
 cores/re3/*.a
+cores/re3/*.elf
+cores/re3/*.bin
+upstream-librw/
+upstream-re3/
+gta3
+*.ppm
+frame_*.png
+gb_frame_*.png
+

@@ -84,7 +84,7 @@ MIPS_ARCH := -EL -march=mips32 -mtune=mips32r2 -msoft-float -G0 -mno-abicalls -f
 # dirent.h, the fs_* and os_* calls and the pad API.  RE3_CONSOLE_SDK tells the
 # port that those are available (multicore's os_get_tick_count/dly_tsk replace
 # clock_gettime/nanosleep, which this newlib does not have at all).
-MIPS_CXXFLAGS := -std=gnu++11 -O2 $(MIPS_ARCH) -ffunction-sections -fdata-sections -MMD -MP \
+MIPS_CXXFLAGS := -std=gnu++11 -O2 -fno-strict-aliasing $(MIPS_ARCH) -ffunction-sections -fdata-sections -MMD -MP \
                  -I$(MULTICORE)/include -DRE3_CONSOLE_SDK \
                  $(COMMON_DEFS) $(WARNINGS) $(INCLUDES)
 SF2000_DEFS := -DSF2000
@@ -95,7 +95,7 @@ MIPS_AR := $(BINUTIL)ar
 # ================================================================== targets ==
 
 .PHONY: all native runner test softtest sf2000 gb300 sf2000-core gb300-core \
-        deploy-sf2000 deploy-gb300 clean distclean cores
+        deploy-sf2000 deploy-gb300 clean distclean cores gbsim gb300runner
 
 all: native runner softtest sf2000 gb300
 
@@ -103,6 +103,70 @@ native: $(NATIVE_DIR)/libretro_re3.so
 runner: $(NATIVE_DIR)/test_runner_re3
 softtest: $(NATIVE_DIR)/soft_render_test
 test: native runner softtest
+
+# ============================================================ gb300 sim ====
+# The console is a ~900 MHz MIPS32r2 with no FPU and a 32-bit address space.
+# A native -m32 build with x87 and no SSE is the closest stand-in available on
+# this host: 32-bit pointers, every float in memory rather than in a vector
+# register, and no auto-vectorised inner loops.  It still runs on real silicon,
+# so it is a *model* of the console, not the console - runner/gb300_runner.c
+# adds the missing part (RAM cap and CPU throttle) and scales the measured time
+# by GBSIM_CPU_FACTOR to predict console frame rate.
+#
+#   make gbsim        -> build/gbsim/libretro_re3.so   (32-bit, no FPU/SIMD)
+#   make gb300runner  -> build/gbsim/gb300_runner     (throttling test runner)
+GBSIM_DIR   := $(TOP)/build/gbsim
+GBSIM_DEFS  := -DSF2000 -DGB300V2
+# -m32: 32-bit pointers and ABI, like the console.
+# -mfpmath=387 -mno-sse*: x87 only.  No SSE means no vector registers, no
+#   auto-vectorisation and no hardware sqrt/rcp, so the float traffic in the
+#   software rasteriser costs what it costs on a FPU-less part.
+GBSIM_ARCH  := -m32 -mfpmath=387 -mno-sse -mno-sse2 -mno-mmx -mno-3dnow \
+               -fno-tree-vectorize
+GBSIM_CXXFLAGS := -std=gnu++11 -O2 -g -fPIC -fno-strict-aliasing $(GBSIM_ARCH) \
+                  -MMD -MP $(COMMON_DEFS) $(GBSIM_DEFS) \
+                  $(WARNINGS) $(INCLUDES)
+GBSIM_ENGINE := $(patsubst $(ENGINE)/%.cpp,$(GBSIM_DIR)/engine/%.o,$(RE3_ALL))
+GBSIM_LIBRW  := $(patsubst $(LIBRW)/%.cpp,$(GBSIM_DIR)/librw/%.o,$(LIBRW_CPP)) \
+                $(patsubst $(LIBRW)/%.c,$(GBSIM_DIR)/librw/%.o,$(LIBRW_C))
+GBSIM_CORE   := $(GBSIM_DIR)/libretro_core.o $(GBSIM_DIR)/hacker_loader.o
+
+gbsim: $(GBSIM_DIR)/libretro_re3.so
+gb300runner: $(GBSIM_DIR)/gb300_runner
+
+$(GBSIM_DIR):
+	@mkdir -p $@
+
+$(GBSIM_DIR)/engine/%.o: $(ENGINE)/%.cpp | $(GBSIM_DIR)
+	@mkdir -p $(dir $@)
+	@$(HOSTCXX) $(GBSIM_CXXFLAGS) -c $< -o $@
+
+$(GBSIM_DIR)/librw/%.o: $(LIBRW)/%.cpp | $(GBSIM_DIR)
+	@mkdir -p $(dir $@)
+	@$(HOSTCXX) $(GBSIM_CXXFLAGS) -c $< -o $@
+
+$(GBSIM_DIR)/librw/%.o: $(LIBRW)/%.c | $(GBSIM_DIR)
+	@mkdir -p $(dir $@)
+	@$(HOSTCC) $(GBSIM_CXXFLAGS) -c $< -o $@
+
+$(GBSIM_DIR)/libretro_core.o: $(TOP)/libretro/libretro_core.cpp | $(GBSIM_DIR)
+	@$(HOSTCXX) $(GBSIM_CXXFLAGS) -c $< -o $@
+
+$(GBSIM_DIR)/hacker_loader.o: $(TOP)/libretro/hacker_loader.c | $(GBSIM_DIR)
+	@$(HOSTCC) $(GBSIM_CXXFLAGS) -I$(TOP)/libretro -c $< -o $@
+
+$(GBSIM_DIR)/libretro_re3.so: $(GBSIM_ENGINE) $(GBSIM_LIBRW) $(GBSIM_CORE)
+	@echo "  LD      $@"
+	@mkdir -p $(dir $@)
+	@$(HOSTCXX) $(GBSIM_CXXFLAGS) -shared -o $@ $(GBSIM_ENGINE) $(GBSIM_LIBRW) \
+	    $(GBSIM_DIR)/libretro_core.o $(GBSIM_DIR)/hacker_loader.o -lm -ldl
+
+$(GBSIM_DIR)/gb300_runner: $(TOP)/runner/gb300_runner.c | $(GBSIM_DIR)
+	@echo "  LD      $@"
+	@$(HOSTCC) -m32 -O2 -g -I$(TOP)/libretro -o $@ $< -ldl
+
+-include $(GBSIM_ENGINE:.o=.d) $(GBSIM_LIBRW:.o=.d) $(GBSIM_DIR)/libretro_core.d \
+         $(GBSIM_DIR)/hacker_loader.d
 
 $(NATIVE_DIR):
 	@mkdir -p $@
@@ -119,14 +183,19 @@ $(NATIVE_DIR)/librw/%.o: $(LIBRW)/%.c | $(NATIVE_DIR)
 	@mkdir -p $(dir $@)
 	@$(HOSTCC) $(NATIVE_CXXFLAGS) -c $< -o $@
 
-$(NATIVE_DIR)/libretro_re3.so: $(NATIVE_ENGINE) $(NATIVE_LIBRW) $(NATIVE_DIR)/libretro_core.o
+$(NATIVE_DIR)/libretro_re3.so: $(NATIVE_ENGINE) $(NATIVE_LIBRW) $(NATIVE_DIR)/libretro_core.o $(NATIVE_DIR)/hacker_loader.o
 	@echo "  LD      $@"
 	@mkdir -p $(dir $@)
 	@$(HOSTCXX) $(NATIVE_CXXFLAGS) -shared -o $@ $(NATIVE_ENGINE) $(NATIVE_LIBRW) \
-	    $(NATIVE_DIR)/libretro_core.o -lm -lpthread -ldl
+	    $(NATIVE_DIR)/libretro_core.o $(NATIVE_DIR)/hacker_loader.o -lm -lpthread -ldl
 
 $(NATIVE_DIR)/libretro_core.o: $(TOP)/libretro/libretro_core.cpp | $(NATIVE_DIR)
 	@$(HOSTCXX) $(NATIVE_CXXFLAGS) -c $< -o $@
+
+# The on-screen boot log (libretro/hacker_loader.c).  Kept out of the engine
+# objects because it is purely a libretro-layer debugging aid.
+$(NATIVE_DIR)/hacker_loader.o: $(TOP)/libretro/hacker_loader.c | $(NATIVE_DIR)
+	@$(HOSTCC) $(NATIVE_CXXFLAGS) -I$(TOP)/libretro -c $< -o $@
 
 $(NATIVE_DIR)/test_runner_re3: $(TOP)/runner/test_runner_re3.c | $(NATIVE_DIR)
 	@echo "  LD      $@"
@@ -167,18 +236,26 @@ $(2)/librw/%.o: $$(LIBRW)/%.c
 	@mkdir -p $$(dir $$@)
 	@$$(FROG)gcc $(3) -c $$< -o $$@
 
-$(2)/libretro_re3.a: $$($(1)_ENGINE) $$($(1)_LIBRW) $(2)/libretro_core.o
+$(2)/libretro_re3.a: $$($(1)_ENGINE) $$($(1)_LIBRW) $(2)/libretro_core.o $(2)/hacker_loader.o
 	@echo "  AR      $$@"
-	@$$(MIPS_AR) rcs $$@ $$($(1)_ENGINE) $$($(1)_LIBRW) $(2)/libretro_core.o
+	@$$(MIPS_AR) rcs $$@ $$($(1)_ENGINE) $$($(1)_LIBRW) $(2)/libretro_core.o $(2)/hacker_loader.o
 endef
 
 $(eval $(call MIPS_RULES,sf2000,$(SF2000_DIR),$(SF2000_CXXFLAGS)))
 $(eval $(call MIPS_RULES,gb300,$(GB300_DIR),$(GB300_CXXFLAGS)))
 
 # Every object writes a .d file next to itself, listing the headers it read.
--include $(NATIVE_ENGINE:.o=.d) $(NATIVE_LIBRW:.o=.d) $(NATIVE_DIR)/libretro_core.d
--include $(sf2000_ENGINE:.o=.d) $(sf2000_LIBRW:.o=.d) $(SF2000_DIR)/libretro_core.d
--include $(gb300_ENGINE:.o=.d) $(gb300_LIBRW:.o=.d) $(GB300_DIR)/libretro_core.d
+-include $(NATIVE_ENGINE:.o=.d) $(NATIVE_LIBRW:.o=.d) $(NATIVE_DIR)/libretro_core.d $(NATIVE_DIR)/hacker_loader.d
+-include $(sf2000_ENGINE:.o=.d) $(sf2000_LIBRW:.o=.d) $(SF2000_DIR)/libretro_core.d $(SF2000_DIR)/hacker_loader.d
+-include $(gb300_ENGINE:.o=.d) $(gb300_LIBRW:.o=.d) $(GB300_DIR)/libretro_core.d $(GB300_DIR)/hacker_loader.d
+
+$(SF2000_DIR)/hacker_loader.o: $(TOP)/libretro/hacker_loader.c
+	@mkdir -p $(dir $@)
+	@$(FROG)gcc $(SF2000_CXXFLAGS) -I$(TOP)/libretro -c $< -o $@
+
+$(GB300_DIR)/hacker_loader.o: $(TOP)/libretro/hacker_loader.c
+	@mkdir -p $(dir $@)
+	@$(FROG)gcc $(GB300_CXXFLAGS) -I$(TOP)/libretro -c $< -o $@
 
 $(SF2000_DIR)/libretro_core.o: $(TOP)/libretro/libretro_core.cpp
 	@mkdir -p $(dir $@)
@@ -205,15 +282,28 @@ gb300-core: gb300 cores
 	@$(MAKE) -C $(MULTICORE) CORE=$(TOP)/cores/re3 CONSOLE=re3 \
 	    FROGGY_TYPE=GB300V2 -j$(shell nproc)
 
-# The multicore resolves a launch stub as
-#   ROMS/<corename>;<directory>;<rom filename>.gba
-# and then loads cores/<corename>.sf2k, passing /mnt/sda1/ROMS/<directory>/
-# <rom filename> to retro_load_game().  The core only needs a file inside the
-# data directory - it strips the name and uses the directory - so the stub
-# points at a placeholder and the game files go in ROMS/re3/.
+# ---- card layout ----------------------------------------------------------
+# The stock FrogOS frontend on this card resolves a launch entry like this:
+#
+#   ROMS/<name>.gba               the stub *file name* is what FrogUI lists
+#   ROMS/<corename>;<dir>;<rom>.gba  ...and its *contents* are the same triple
+#   cores/<corename>/core_87000000    the binary, loaded at 0x87000000
+#   ROMS/<dir>/<rom>                  handed to retro_load_game()
+#
+# See for instance cores/classicube/core_87000000 driven by the stub
+# "ROMS/classicube;mc.gba", whose 28-byte body reads "opticraft;opticraft;opticlay".
+# The core only needs a file that exists inside the data directory - it strips
+# the name and keeps the directory - so the stub names a placeholder and the
+# game files live in ROMS/re3/.
+#
+# Note this is NOT the multicore's own layout: sf2000_multicore/src/main.c:124
+# reads system/Deimos/cores/<corename>.sf2k instead.  deploy-deimos installs
+# that variant for anyone launching from the Deimos frontend.
 SDCARD ?= /media/Sajnaps/GB300
 RE3_DATA_DIR ?= $(SDCARD)/ROMS/re3
 RE3_STUB ?= $(SDCARD)/ROMS/re3;re3;re3.gba
+RE3_CORE_DIR ?= $(SDCARD)/cores/re3
+RE3_CORE ?= $(RE3_CORE_DIR)/core_87000000
 
 deploy-sf2000: sf2000-core install-card
 
@@ -221,14 +311,25 @@ deploy-sf2000: sf2000-core install-card
 deploy-gb300: gb300-core install-card
 
 install-card:
-	@mkdir -p $(SDCARD)/cores $(RE3_DATA_DIR)
+	@mkdir -p $(RE3_CORE_DIR) $(RE3_DATA_DIR) $(DEIMOS_CORES_DIR) $(SDCARD)/cores
+	@cp -f $(MULTICORE)/build/core_87000000 $(RE3_CORE)
 	@cp -f $(MULTICORE)/build/core_87000000 $(SDCARD)/cores/re3.sf2k
-	@printf 'FrogOS stub\n' > "$(RE3_STUB)"
+	@cp -f $(MULTICORE)/build/core_87000000 $(DEIMOS_CORES_DIR)/re3.sf2k
+	@printf 're3;re3;re3' > "$(RE3_STUB)"
 	@touch $(RE3_DATA_DIR)/re3
 	@echo "installed:"
-	@echo "  core       $(SDCARD)/cores/re3.sf2k"
-	@echo "  stub       \"$(RE3_STUB)\""
+	@echo "  core       $(RE3_CORE)"
+	@echo "  sf2k core  $(SDCARD)/cores/re3.sf2k"
+	@echo "  deimos     $(DEIMOS_CORES_DIR)/re3.sf2k"
+	@echo "  stub       \"$(RE3_STUB)\"  ->  re3;re3;re3"
 	@echo "  data dir   $(RE3_DATA_DIR)  (put models/, data/, audio/ here)"
+
+# The multicore's own frontend (system/Deimos/cores/<corename>.sf2k).
+DEIMOS_CORES_DIR ?= $(SDCARD)/system/Deimos/cores
+deploy-deimos: gb300-core
+	@mkdir -p $(DEIMOS_CORES_DIR)
+	@cp -f $(MULTICORE)/build/core_87000000 $(DEIMOS_CORES_DIR)/re3.sf2k
+	@echo "installed $(DEIMOS_CORES_DIR)/re3.sf2k"
 
 clean:
 	@rm -rf $(TOP)/build

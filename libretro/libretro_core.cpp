@@ -23,6 +23,8 @@
 
 #include "rwcore.h"
 
+#include "hacker_loader.h"
+
 typedef uint16_t uint16;
 typedef int16_t  int16t_unused_placeholder;
 
@@ -106,7 +108,7 @@ static struct retro_core_option_definition option_defs[] = {
 			{ "320x240", "re3_res_320x240" },
 			{ NULL, NULL },
 		},
-		"re3_res_256x192",
+		"re3_res_208x156",
 	},
 	{
 		"re3_language",
@@ -162,11 +164,17 @@ static void check_options(void)
 	var.key = "re3_internal_resolution";
 	var.value = NULL;
 	if(s_environ_cb && s_environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value){
+		const char *p = strstr(var.value, "res_");
+		if(p) p += 4;
+		else p = var.value;
 		int w = 0, h = 0;
-		if(sscanf(var.value, "%dx%d", &w, &h) == 2 && w > 0 && h > 0){
+		if(sscanf(p, "%dx%d", &w, &h) == 2 && w > 0 && h > 0){
 			sf2000ScreenWidth = w;
 			sf2000ScreenHeight = h;
 		}
+	} else {
+		sf2000ScreenWidth = 320;
+		sf2000ScreenHeight = 240;
 	}
 
 	var.key = "re3_language";
@@ -357,7 +365,7 @@ void retro_get_system_av_info(struct retro_system_av_info *info)
 }
 
 void retro_set_environment(retro_environment_t cb)            { s_environ_cb        = cb; }
-void retro_set_video_refresh(retro_video_refresh_t cb)        { s_video_cb          = cb; }
+void retro_set_video_refresh(retro_video_refresh_t cb)        { s_video_cb          = cb; hacker_loader_set_video_cb(cb); }
 void retro_set_audio_sample(retro_audio_sample_t cb)          { s_audio_cb          = cb; }
 void retro_set_audio_sample_batch(retro_audio_sample_batch_t cb) { s_audio_batch_cb = cb; }
 void retro_set_input_poll(retro_input_poll_t cb)              { s_input_poll_cb     = cb; }
@@ -366,8 +374,8 @@ void retro_set_input_state(retro_input_state_t cb)            { s_input_state_cb
 void retro_init(void)
 {
 	enum retro_pixel_format fmt = RETRO_PIXEL_FORMAT_RGB565;
-	sf2000ScreenWidth  = 256;
-	sf2000ScreenHeight = 192;
+	sf2000ScreenWidth  = 320;
+	sf2000ScreenHeight = 240;
 	sf2000Language     = 0;
 	sf2000ShowFps      = false;
 	gta3MaxTextureSize = 64;
@@ -379,6 +387,22 @@ void retro_init(void)
 	memset(s_audio_buffer, 0, sizeof(s_audio_buffer));
 	if(s_environ_cb){
 		s_environ_cb(RETRO_ENVIRONMENT_SET_PIXEL_FORMAT, &fmt);
+		static const struct retro_input_descriptor input_descriptors[] = {
+			{ 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_LEFT,   "Walk Left / Steer Left" },
+			{ 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_RIGHT,  "Walk Right / Steer Right" },
+			{ 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_UP,     "Walk Forward / Accelerate" },
+			{ 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_DOWN,   "Walk Backward / Reverse" },
+			{ 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_B,      "Sprint / Accelerate (Cross)" },
+			{ 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_A,      "Attack / Shoot (Circle)" },
+			{ 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_X,      "Enter / Exit Vehicle (Triangle)" },
+			{ 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_Y,      "Jump / Brake (Square)" },
+			{ 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_L,      "Cycle Weapon Prev / Look Left" },
+			{ 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_R,      "Cycle Weapon Next / Look Right" },
+			{ 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_START,  "Pause Menu" },
+			{ 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_SELECT, "Change Camera" },
+			{ 0 }
+		};
+		s_environ_cb(RETRO_ENVIRONMENT_SET_INPUT_DESCRIPTORS, (void*)input_descriptors);
 		unsigned ver = 0;
 		if(s_environ_cb(RETRO_ENVIRONMENT_GET_CORE_OPTIONS_VERSION, &ver) && ver >= 2)
 			s_environ_cb(RETRO_ENVIRONMENT_SET_CORE_OPTIONS_V2, option_defs);
@@ -398,15 +422,26 @@ void retro_deinit(void)
 
 bool retro_load_game(const struct retro_game_info *info)
 {
+	/* Start the on-screen log before anything else can fail: the point of it is
+	 * to leave a visible record of how far startup got, so it has to be running
+	 * before the first risky call. */
+	hacker_loader_init(info ? info->path : NULL);
+
 	if(!resolve_content_dir(info)){
 		core_log(RETRO_LOG_ERROR,
 		         "[re3] no GTA III data found next to '%s' (expected models/menu.txd)\n",
 		         (info && info->path) ? info->path : "(null)");
+		hacker_loader_log("ERR", "NO GTA3 DATA DIRECTORY", 0);
 		return false;
 	}
+	hacker_loader_log("VFS", "CONTENT DIR RESOLVED", 15);
 	core_log(RETRO_LOG_INFO, "[re3] content dir: %s\n", s_content_dir);
+
 	check_options();
+	hacker_loader_log("OPT", "CORE OPTIONS APPLIED", 20);
+
 	sf2000Startup(s_content_dir);
+	hacker_loader_log("RW", "ENGINE STARTED", 60);
 	s_loaded = true;
 	return true;
 }
@@ -500,6 +535,17 @@ static double now_ms(void)
  */
 static void pace_frame(void)
 {
+	return;
+}
+
+#if 0
+static void pace_frame_old(void)
+{
+	if(s_skipPace < 0)
+		s_skipPace = (getenv("RE3_NO_PACE") != NULL);
+	if(s_skipPace)
+		return;
+
 	static double s_next_due;
 	static int    s_ready;
 
@@ -530,6 +576,18 @@ static void pace_frame(void)
 		}
 	}
 }
+#endif
+
+void sf2000PresentFrame(void)
+{
+	if(s_video_cb && sf2000FrameReady()){
+		int w = 0, h = 0;
+		uint16 *fb = sf2000Framebuffer(&w, &h);
+		if(fb)
+			s_video_cb(fb, (unsigned)w, (unsigned)h, (size_t)w*sizeof(uint16));
+		sf2000ClearFrameReady();
+	}
+}
 
 void retro_run(void)
 {
@@ -554,14 +612,36 @@ void retro_run(void)
 		uint16 *fb = sf2000Framebuffer(&w, &h);
 		if(s_video_cb && fb)
 			s_video_cb(fb, (unsigned)w, (unsigned)h, (size_t)w*sizeof(uint16));
+
+		/* Device-side frame capture: write a couple of real on-console frames
+		 * next to the game files so rendering bugs that only reproduce on the
+		 * hardware can be inspected offline.  Cheap because it fires twice. */
+		{
+			static int s_dbgFrame = 0;
+			s_dbgFrame++;
+			if(fb && w > 0 && h > 0 && (s_dbgFrame == 150 || s_dbgFrame == 300)){
+				char name[64];
+				snprintf(name, sizeof(name), "re3_dbg_%04d.ppm", s_dbgFrame);
+				FILE *f = fopen(name, "wb");
+				if(f){
+					fprintf(f, "P6\n%d %d\n255\n", w, h);
+					for(int i = 0; i < w*h; i++){
+						uint16 p = fb[i];
+						fputc(((p >> 11) & 0x1F) << 3, f);
+						fputc(((p >> 5) & 0x3F) << 2, f);
+						fputc((p & 0x1F) << 3, f);
+					}
+					fclose(f);
+				}
+			}
+		}
 		sf2000ClearFrameReady();
 	}
 
 	if(s_audio_batch_cb && s_audio_cb){
-		/* Audio arrives through the sampman backend when it is enabled; until
-		 * then this is silence at the right rate so the host's buffer keeps
-		 * moving. */
-		memset(s_audio_buffer, 0, sizeof(s_audio_buffer));
+		/* The stock firmware routes s_audio_batch_cb to PlayFrame (vsync/pump).
+		 * Passing the silent buffer satisfies the firmware's vertical sync without
+		 * any game audio overhead. */
 		s_audio_batch_cb(s_audio_buffer, AUDIO_FRAMES);
 	}
 

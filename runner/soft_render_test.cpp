@@ -140,6 +140,7 @@ static void setCameraPos(V3d pos);
 static void
 setupEngine(void)
 {
+	rw::soft::worldRenderRes = 1.0f;
 	gCamera = Camera::create();
 	gFrame = Frame::create();
 	gCamera->setFrame(gFrame);

@@ -20,6 +20,7 @@
 #include <dlfcn.h>
 #include <time.h>
 #include <sys/stat.h>
+#include <sys/resource.h>
 #include <signal.h>
 #include <execinfo.h>
 #include <unistd.h>
@@ -201,8 +202,8 @@ parse_script(const char *script)
 {
 	s_step_count = 0;
 	char *copy = strdup(script);
-	char *save = NULL;
-	for(char *tok = strtok_r(copy, ",", &save); tok; tok = strtok_r(NULL, ",", &save)){
+	char *save1 = NULL;
+	for(char *tok = strtok_r(copy, ",", &save1); tok; tok = strtok_r(NULL, ",", &save1)){
 		char *colon = strchr(tok, ':');
 		if(!colon)
 			continue;
@@ -216,7 +217,8 @@ parse_script(const char *script)
 			continue;
 		}
 		uint32_t mask = 0;
-		for(char *b = strtok_r(colon+1, "+", &save); b; b = strtok_r(NULL, "+", &save))
+		char *save2 = NULL;
+		for(char *b = strtok_r(colon+1, "+", &save2); b; b = strtok_r(NULL, "+", &save2))
 			mask |= button_bit(b);
 		if(s_step_count < 256){
 			s_steps[s_step_count].first = first;
@@ -296,7 +298,7 @@ main(int argc, char **argv)
 	const char *content   = argv[2];
 	int frames      = argc > 3 ? atoi(argv[3]) : 300;
 	int dump_every  = argc > 4 ? atoi(argv[4]) : 30;
-	const char *script = argc > 5 ? argv[5] : "60-70:a,120-130:d,180-190:a";
+	const char *script = argc > 5 ? argv[5] : "60-70:a,120-130:down,180-190:a";
 	int watchdog_secs  = argc > 6 ? atoi(argv[6]) : 60;
 
 	if(script)
@@ -421,6 +423,10 @@ main(int argc, char **argv)
 	fprintf(stderr, "\n%d frames, %.1f ms/frame (%.1f fps), %d screenshots\n",
 	        rendered, rendered ? total/rendered : 0.0,
 	        rendered ? 1000.0/(total/rendered) : 0.0, s_frames_dumped);
+
+	struct rusage ru;
+	if(getrusage(RUSAGE_SELF, &ru) == 0)
+		fprintf(stderr, "peak RSS: %.2f MB\n", (double)ru.ru_maxrss / 1024.0);
 
 	retro_unload_game();
 	retro_deinit();
